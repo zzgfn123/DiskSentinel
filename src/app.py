@@ -170,7 +170,7 @@ class DiskSentinelApp:
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                     spacing=4,
                 ),
-                padding=ft.padding.only(top=16, bottom=8),
+                padding=ft.padding.only(top=16, bottom=8, left=0, right=0),
             ),
             destinations=destinations,
             on_change=self._on_nav_change,

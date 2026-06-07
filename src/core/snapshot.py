@@ -15,6 +15,16 @@ from typing import Optional, Callable, List, Dict, Any
 class SnapshotEngine:
     """快照扫描和对比引擎，负责扫描目录并对比快照差异。"""
 
+    # 默认排除的目录（仅排除开发构建缓存，不排除系统目录）
+    DEFAULT_EXCLUDE_DIRS = {
+        "node_modules", ".git", "__pycache__", ".cache",
+        ".gradle", ".tox", ".mypy_cache", ".pytest_cache",
+        "venv", ".venv", "__pypackages__",
+    }
+
+    MAX_FILES = 500000  # 单次扫描最大文件数
+    SCAN_TIMEOUT = 300  # 扫描超时（秒）
+
     def __init__(self, db_manager):
         """
         初始化快照引擎。
@@ -105,15 +115,24 @@ class SnapshotEngine:
             if self._cancel_flag.is_set():
                 break
 
-            # 按排除模式过滤目录（原地修改 dirs 列表以阻止 os.walk 进入）
+            # 超时检查
+            if time.time() - start_time > self.SCAN_TIMEOUT:
+                break
+
+            # 按排除模式 + 默认排除目录过滤
             dirs[:] = [
                 d for d in dirs
                 if not self._is_excluded(os.path.join(root, d), d, patterns)
+                and d not in self.DEFAULT_EXCLUDE_DIRS
             ]
             dir_count += len(dirs)
 
             for filename in files:
                 if self._cancel_flag.is_set():
+                    break
+
+                # 文件数上限检查
+                if file_count >= self.MAX_FILES:
                     break
 
                 filepath = os.path.join(root, filename)
@@ -341,17 +360,19 @@ class SnapshotEngine:
     # 一站式扫描
     # ------------------------------------------------------------------
 
-    def run_scan(self, config_id: int) -> Dict[str, Any]:
+    def run_scan(self, config_id: int, baseline_snapshot_id: int = None) -> Dict[str, Any]:
         """
         根据配置执行完整扫描流程：读取配置 → 扫描 → 对比 → 返回结果。
 
         Args:
             config_id: scan_configs 表中的配置 ID
+            baseline_snapshot_id: 指定对比的基准快照 ID。为 None 时自动使用该路径的最近一条快照。
 
         Returns:
             {
                 'snapshot_id': int,
-                'comparison': dict | None,   # 首次扫描无对比结果
+                'baseline_snapshot_id': int | None,
+                'comparison': dict | None,
                 'file_count': int,
                 'total_size': int,
                 'duration': float,
@@ -384,23 +405,30 @@ class SnapshotEngine:
         total_size = snap_rows[0]["total_size"] if snap_rows else 0
         duration = snap_rows[0]["duration"] if snap_rows else 0.0
 
-        # 尝试找到该配置的最近一次历史快照进行对比
+        # 确定基准快照
+        old_snapshot_id = baseline_snapshot_id
+        if old_snapshot_id is None:
+            # 未指定基准，自动取该路径最近一条历史快照
+            hist_rows = self.db.execute_query(
+                """
+                SELECT id FROM snapshots
+                WHERE config_id = ? AND id < ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (config_id, snapshot_id),
+            )
+            if hist_rows:
+                old_snapshot_id = hist_rows[0]["id"]
+
+        # 对比
         comparison = None
-        hist_rows = self.db.execute_query(
-            """
-            SELECT id FROM snapshots
-            WHERE config_id = ? AND id < ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (config_id, snapshot_id),
-        )
-        if hist_rows:
-            old_snapshot_id = hist_rows[0]["id"]
+        if old_snapshot_id is not None:
             comparison = self.compare_snapshots(old_snapshot_id, snapshot_id)
 
         return {
             "snapshot_id": snapshot_id,
+            "baseline_snapshot_id": old_snapshot_id,
             "comparison": comparison,
             "file_count": file_count,
             "total_size": total_size,

@@ -42,6 +42,7 @@ class ScannerPage:
         self._progress_bars: dict[int, ft.ProgressBar] = {}  # config_id -> ProgressBar
         self._status_texts: dict[int, ft.Text] = {}           # config_id -> status Text
         self._result_bars: dict[int, ft.Container] = {}       # config_id -> result summary
+        self._baseline_dropdowns: dict[int, ft.Dropdown] = {} # config_id -> baseline selector
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -49,6 +50,8 @@ class ScannerPage:
 
     def build(self) -> ft.Control:
         """构建并返回扫描管理页面的完整 UI。"""
+        # 延迟加载数据，确保 UI 已构建
+        self.page.run_task(self._async_refresh)
         return ft.Column(
             controls=[
                 self._build_header(),
@@ -59,12 +62,17 @@ class ScannerPage:
             scroll=ft.ScrollMode.AUTO,
         )
 
+    async def _async_refresh(self):
+        """异步刷新数据列表。"""
+        self.refresh()
+
     def refresh(self):
         """从数据库刷新监控路径列表。"""
         self._list_view.controls.clear()
         self._progress_bars.clear()
         self._status_texts.clear()
         self._result_bars.clear()
+        self._baseline_dropdowns.clear()
 
         configs = self.db.get_scan_configs()
 
@@ -181,7 +189,6 @@ class ScannerPage:
         progress_bar = ft.ProgressBar(
             width=300,
             height=6,
-            bar_radius=3,
             color=_COLOR_PRIMARY,
             bgcolor=_COLOR_BORDER,
             visible=False,
@@ -195,6 +202,27 @@ class ScannerPage:
         # 结果摘要区域
         result_container = ft.Container(visible=False)
         self._result_bars[config_id] = result_container
+
+        # 基准快照选择器
+        baseline_options = [ft.dropdown.Option("latest", "最近一条快照（默认）")]
+        hist_snaps = self.db.execute_query(
+            "SELECT id, created_at, file_count FROM snapshots WHERE config_id = ? ORDER BY id DESC LIMIT 20",
+            (config_id,),
+        )
+        for hs in hist_snaps:
+            label = f"#{hs['id']}  {format_datetime(hs['created_at'])}  ({format_number(hs['file_count'])} 文件)"
+            baseline_options.append(ft.dropdown.Option(str(hs["id"]), label))
+
+        baseline_dropdown = ft.Dropdown(
+            label="对比基准",
+            options=baseline_options,
+            value="latest",
+            width=420,
+            text_size=12,
+            dense=True,
+            visible=len(hist_snaps) > 0,
+        )
+        self._baseline_dropdowns[config_id] = baseline_dropdown
 
         card = ft.Container(
             content=ft.Column(
@@ -249,6 +277,8 @@ class ScannerPage:
                         spacing=8,
                         run_spacing=4,
                     ),
+                    # 基准快照选择器
+                    baseline_dropdown,
                     # 进度条
                     ft.Row(
                         controls=[progress_bar, status_text],
@@ -590,14 +620,25 @@ class ScannerPage:
         progress_bar = self._progress_bars.get(config_id)
         status_text = self._status_texts.get(config_id)
         result_container = self._result_bars.get(config_id)
+        baseline_dd = self._baseline_dropdowns.get(config_id)
 
         if progress_bar is None or status_text is None:
             return
 
+        # 读取基准快照选择
+        baseline_snapshot_id = None
+        if baseline_dd and baseline_dd.value and baseline_dd.value != "latest":
+            try:
+                baseline_snapshot_id = int(baseline_dd.value)
+            except (ValueError, TypeError):
+                baseline_snapshot_id = None
+
+        baseline_label = f"#{baseline_snapshot_id}" if baseline_snapshot_id else "最近一条快照"
+
         # 显示进度条
         progress_bar.visible = True
         progress_bar.value = None  # 不确定模式
-        status_text.value = "正在扫描..."
+        status_text.value = f"正在扫描...（对比基准: {baseline_label}）"
         status_text.visible = True
         if result_container:
             result_container.visible = False
@@ -613,11 +654,13 @@ class ScannerPage:
                     except Exception:
                         pass
 
-                result = self.snapshot_engine.run_scan(config_id)
+                result = self.snapshot_engine.run_scan(config_id, baseline_snapshot_id)
 
                 # 扫描完成
+                baseline_id = result.get("baseline_snapshot_id")
+                bl = f"（基准: #{baseline_id}）" if baseline_id else "（首次扫描，无对比）"
                 progress_bar.value = 1.0
-                status_text.value = f"扫描完成 · 耗时 {format_duration(result.get('duration', 0))}"
+                status_text.value = f"扫描完成 · 耗时 {format_duration(result.get('duration', 0))} {bl}"
                 status_text.color = _COLOR_SUCCESS
                 self.page.update()
 
@@ -625,7 +668,12 @@ class ScannerPage:
                 comparison = result.get("comparison")
                 if comparison and result_container:
                     summary = comparison.get("summary", {})
-                    result_container.content = self._build_scan_result(summary)
+                    changes = {
+                        "added": comparison.get("added", []),
+                        "removed": comparison.get("removed", []),
+                        "modified": comparison.get("modified", []),
+                    }
+                    result_container.content = self._build_scan_result(summary, changes)
                     result_container.visible = True
 
                 self.page.update()
@@ -639,8 +687,8 @@ class ScannerPage:
         thread = threading.Thread(target=_run_scan, daemon=True)
         thread.start()
 
-    def _build_scan_result(self, summary: dict) -> ft.Container:
-        """构建扫描结果摘要区域。"""
+    def _build_scan_result(self, summary: dict, changes: dict = None) -> ft.Container:
+        """构建扫描结果摘要区域，包含统计和文件列表。"""
         added = summary.get("added_count", 0)
         removed = summary.get("removed_count", 0)
         modified = summary.get("modified_count", 0)
@@ -648,20 +696,112 @@ class ScannerPage:
 
         delta_color = _COLOR_SUCCESS if size_delta >= 0 else _COLOR_DANGER
         delta_sign = "+" if size_delta >= 0 else ""
-        delta_text = f"{delta_sign}{format_size(size_delta)}"
+        delta_text = f"{delta_sign}{format_size(abs(size_delta))}"
+
+        # 统计数字行
+        stats_row = ft.Row(
+            controls=[
+                self._build_stat_chip(ft.Icons.ADD_CIRCLE, f"新增: {format_number(added)}", _COLOR_SUCCESS),
+                self._build_stat_chip(ft.Icons.REMOVE_CIRCLE, f"删除: {format_number(removed)}", _COLOR_DANGER),
+                self._build_stat_chip(ft.Icons.EDIT, f"修改: {format_number(modified)}", _COLOR_WARNING),
+                self._build_stat_chip(ft.Icons.STORAGE, f"容量变化: {delta_text}", delta_color),
+            ],
+            spacing=12,
+            wrap=True,
+        )
+
+        # 具体文件列表
+        file_list_controls = []
+        if changes:
+            max_show = 50  # 每类最多显示 50 条
+
+            if changes.get("added"):
+                file_list_controls.append(
+                    self._build_file_section("新增文件", _COLOR_SUCCESS, changes["added"], max_show)
+                )
+            if changes.get("removed"):
+                file_list_controls.append(
+                    self._build_file_section("删除文件", _COLOR_DANGER, changes["removed"], max_show)
+                )
+            if changes.get("modified"):
+                file_list_controls.append(
+                    self._build_file_section("修改文件", _COLOR_WARNING, changes["modified"], max_show)
+                )
+
+        content_controls = [stats_row]
+        if file_list_controls:
+            content_controls.append(ft.Divider(height=1, color=_COLOR_BORDER))
+            content_controls.extend(file_list_controls)
 
         return ft.Container(
-            content=ft.Row(
-                controls=[
-                    self._build_stat_chip(ft.Icons.ADD_CIRCLE, f"新增: {format_number(added)}", _COLOR_SUCCESS),
-                    self._build_stat_chip(ft.Icons.REMOVE_CIRCLE, f"删除: {format_number(removed)}", _COLOR_DANGER),
-                    self._build_stat_chip(ft.Icons.EDIT, f"修改: {format_number(modified)}", _COLOR_WARNING),
-                    self._build_stat_chip(ft.Icons.STORAGE, f"容量变化: {delta_text}", delta_color),
-                ],
-                spacing=12,
-                wrap=True,
+            content=ft.Column(
+                controls=content_controls,
+                spacing=6,
             ),
-            padding=ft.padding.only(top=8),
+            padding=ft.padding.only(left=0, top=8, right=0, bottom=0),
+        )
+
+    def _build_file_section(self, title: str, color: str, items: list, max_show: int) -> ft.Column:
+        """构建某一类变化（新增/删除/修改）的文件列表区块。"""
+        file_rows = []
+        shown = items[:max_show]
+        for item in shown:
+            path = item.get("path", "")
+            size = item.get("size", 0)
+            old_size = item.get("old_size", 0)
+
+            # 缩短路径显示
+            display_path = path
+            if len(display_path) > 80:
+                display_path = "..." + display_path[-77:]
+
+            size_text = format_size(size) if size else ""
+            if old_size and title == "修改文件":
+                size_text = f"{format_size(old_size)} → {format_size(size)}"
+
+            file_rows.append(
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Container(width=4, height=4, bgcolor=color, border_radius=2),
+                            ft.Text(
+                                display_path,
+                                size=11,
+                                color=_COLOR_TEXT,
+                                expand=True,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                                tooltip=path,
+                            ),
+                            ft.Text(size_text, size=11, color=_COLOR_TEXT_SECONDARY),
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.padding.only(left=12, top=2, right=8, bottom=2),
+                )
+            )
+
+        # 如果有更多，显示提示
+        remaining = len(items) - max_show
+        if remaining > 0:
+            file_rows.append(
+                ft.Container(
+                    content=ft.Text(
+                        f"... 还有 {format_number(remaining)} 个文件未显示，请在「历史记录」中查看完整列表",
+                        size=11,
+                        color=_COLOR_TEXT_SECONDARY,
+                        italic=True,
+                    ),
+                    padding=ft.padding.only(left=16, top=4, bottom=4),
+                )
+            )
+
+        return ft.Column(
+            controls=[
+                ft.Text(title, size=13, weight=ft.FontWeight.W_600, color=color),
+                *file_rows,
+            ],
+            spacing=2,
         )
 
     def _build_stat_chip(self, icon: str, text: str, color: str) -> ft.Container:

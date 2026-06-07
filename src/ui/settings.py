@@ -112,7 +112,6 @@ class SettingsPage:
             ],
             value="90",
             width=240,
-            text_size=13,
             dense=True,
         )
 
@@ -171,7 +170,6 @@ class SettingsPage:
                                 style=ft.ButtonStyle(
                                     bgcolor=_CLR_DANGER,
                                     color=ft.Colors.WHITE,
-                                    text_size=13,
                                     padding=ft.padding.symmetric(horizontal=16, vertical=8),
                                 ),
                             ),
@@ -181,6 +179,31 @@ class SettingsPage:
                         ],
                         alignment=ft.MainAxisAlignment.START,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+
+                    ft.Container(height=12),
+
+                    # 清空全部数据按钮
+                    ft.Row(
+                        [
+                            ft.OutlinedButton(
+                                "清空全部数据",
+                                icon=ft.Icons.DELETE_OUTLINE,
+                                on_click=self._on_clear_all,
+                                style=ft.ButtonStyle(
+                                    color=_CLR_DANGER,
+                                    padding=ft.padding.symmetric(horizontal=16, vertical=8),
+                                ),
+                            ),
+                            ft.Text(
+                                "删除所有快照、变化记录和监控事件（保留扫描配置）",
+                                size=12,
+                                color=_CLR_TEXT_LIGHT,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.START,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=8,
                     ),
 
                     ft.Container(height=8),
@@ -235,7 +258,6 @@ class SettingsPage:
                                 style=ft.ButtonStyle(
                                     bgcolor=_CLR_PRIMARY,
                                     color=ft.Colors.WHITE,
-                                    text_size=13,
                                     padding=ft.padding.symmetric(horizontal=16, vertical=8),
                                 ),
                             ),
@@ -246,7 +268,6 @@ class SettingsPage:
                                 style=ft.ButtonStyle(
                                     bgcolor=_CLR_SUCCESS,
                                     color=ft.Colors.WHITE,
-                                    text_size=13,
                                     padding=ft.padding.symmetric(horizontal=16, vertical=8),
                                 ),
                             ),
@@ -309,7 +330,7 @@ class SettingsPage:
                     ft.Row(
                         [
                             ft.Container(
-                                content=ft.Icon(ft.Icons.DISK_FULL, size=40, color=_CLR_PRIMARY),
+                                content=ft.Icon(ft.Icons.SD_STORAGE, size=40, color=_CLR_PRIMARY),
                                 bgcolor="#e8f0fe",
                                 border_radius=12,
                                 padding=10,
@@ -493,6 +514,57 @@ class SettingsPage:
         except Exception as ex:
             logger.error("数据清理失败: %s", ex)
             self._show_snack(f"清理失败: {ex}", error=True)
+
+    def _on_clear_all(self, e) -> None:
+        """清空全部数据（保留 scan_configs）。"""
+        def on_confirm(ee):
+            confirm_dlg.open = False
+            self.page.update()
+            self._do_clear_all()
+
+        def on_cancel(ee):
+            confirm_dlg.open = False
+            self.page.update()
+
+        confirm_dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("⚠ 清空全部数据", color=_CLR_DANGER, weight=ft.FontWeight.BOLD),
+            content=ft.Text(
+                "即将删除所有快照、变化记录、文件条目和监控事件。\n\n"
+                "扫描配置将保留。此操作不可撤销！\n\n确定要继续吗？",
+                color=_CLR_TEXT,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=on_cancel),
+                ft.ElevatedButton(
+                    "确认清空",
+                    on_click=on_confirm,
+                    style=ft.ButtonStyle(bgcolor=_CLR_DANGER, color=ft.Colors.WHITE),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(confirm_dlg)
+
+    def _do_clear_all(self) -> None:
+        """执行清空全部数据。"""
+        try:
+            self.db._execute("DELETE FROM changes")
+            self.db._execute("DELETE FROM file_entries")
+            self.db._execute("DELETE FROM watch_events")
+            self.db._execute("DELETE FROM snapshots")
+            self.db._commit()
+
+            # 刷新数据库大小
+            new_size = self._get_db_size()
+            if self._db_size_text:
+                self._db_size_text.value = format_size(new_size)
+                self.page.update()
+
+            self._show_snack("已清空全部数据（扫描配置已保留）")
+        except Exception as ex:
+            logger.error("清空数据失败: %s", ex)
+            self._show_snack(f"清空失败: {ex}", error=True)
 
     def _on_export_config(self, e) -> None:
         """导出扫描配置为 JSON 文件。"""

@@ -258,14 +258,14 @@ class MonitorPage:
                                 ref=ft.Ref[ft.Text](),  # placeholder
                             ),
                         ],
-                        padding=ft.padding.only(left=8),
+                        padding=ft.padding.only(left=8, top=0, right=0, bottom=0),
                     ),
                     self._event_list,
                 ],
                 spacing=4,
                 expand=True,
             ),
-            padding=ft.padding.only(left=16, right=16, bottom=16),
+            padding=ft.padding.only(left=16, right=16, top=0, bottom=16),
             expand=True,
         )
 
