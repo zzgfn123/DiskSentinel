@@ -114,7 +114,8 @@ class ScanScheduler:
 
         logger.info(
             "定时任务已添加: config_id=%s, type=%s, value=%s, next_run=%s",
-            config_id, schedule_type, schedule_value, job.next_run_time,
+            config_id, schedule_type, schedule_value,
+            job.next_run_time if self._started else "(scheduler not started yet)",
         )
         return job.id
 
@@ -259,7 +260,7 @@ class ScanScheduler:
                 logger.error("回调通知失败 (scan_start): %s", e)
 
         try:
-            self.snapshot_engine.scan(config_id)
+            self.snapshot_engine.run_scan(config_id)
             logger.info("定时扫描完成: config_id=%s", config_id)
         except Exception as e:
             logger.error("定时扫描失败: config_id=%s, error=%s", config_id, e)

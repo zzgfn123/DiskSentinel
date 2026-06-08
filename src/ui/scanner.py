@@ -510,12 +510,29 @@ class ScannerPage:
                     schedule_value=sv_val,
                 )
             else:
-                self.db.add_scan_config(
+                new_id = self.db.add_scan_config(
                     path=path,
                     exclude_patterns=exclude_patterns,
                     schedule_type=st_val,
                     schedule_value=sv_val,
                 )
+                config_id = new_id
+
+            # 同步到调度器 —— 创建/更新/删除定时任务
+            try:
+                if st_val in ("interval", "daily", "weekly"):
+                    if not self.scheduler.is_running():
+                        self.scheduler.start()
+                    self.scheduler.add_job(config_id, st_val, sv_val)
+                else:
+                    self.scheduler.remove_job(config_id)
+            except Exception as ex:
+                # 不影响主流程，只提示
+                self.page.snack_bar = ft.SnackBar(
+                    content=ft.Text(f"调度任务注册失败: {ex}"),
+                    bgcolor="#ea4335",
+                )
+                self.page.snack_bar.open = True
 
             dialog.open = False
             self.page.update()
@@ -577,6 +594,10 @@ class ScannerPage:
     def _on_delete_click(self, config_id: int):
         """点击删除按钮，弹出确认对话框。"""
         def _confirm(e):
+            try:
+                self.scheduler.remove_job(config_id)  # 先移除调度任务
+            except Exception:
+                pass
             self.db.delete_scan_config(config_id)
             confirm_dialog.open = False
             self.page.update()

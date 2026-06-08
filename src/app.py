@@ -96,6 +96,10 @@ class DiskSentinelApp:
         self.scheduler = ScanScheduler(self.db_manager, self.snapshot_engine)
         self.reporter = ReportGenerator(self.db_manager)
 
+        # ---------- 启动后台服务 ----------
+        self.scheduler.refresh_jobs()   # 从数据库加载已有的定时任务
+        self.scheduler.start()          # 启动调度器
+
         # ---------- 构建页面 ----------
         self._pages: dict[int, object] = {}
         self._build_ui()
